@@ -5,12 +5,11 @@ import pandas as pd
 import plotly.express as px
 import numpy as np
 from pathlib import Path
+import plotly
 
 st.set_page_config(page_title="Lebanon Transport — Interactive", layout="wide")
 st.title("Public Transportation in Lebanon — Interactive Explorer")
-st.markdown(
-    "Interactively explore town-level data about road conditions, dedicated bus stops, and main transport modes."
-)
+st.markdown("Interactively explore town-level data about road conditions, bus stops, and transport modes.")
 
 CSV_NAME = "Public Transportation.csv"
 BUS_STOP_COL = "Existence of dedicated bus stops - exists"
@@ -31,7 +30,8 @@ def load_data() -> pd.DataFrame:
     here = Path(__file__).parent
     for p in (here / CSV_NAME, here.parent / CSV_NAME):
         if p.exists():
-            return pd.read_csv(p)
+            # utf-8-sig handles BOM just in case
+            return pd.read_csv(p, encoding="utf-8-sig")
     st.error(f"Data file not found. Place **{CSV_NAME}** next to app.py or in the repo root.")
     st.stop()
 
@@ -41,11 +41,11 @@ df = load_data()
 st.sidebar.header("Filters")
 road_type = st.sidebar.radio("Choose road type", ["main", "secondary", "agricultural"], index=0)
 require_bus_stop = st.sidebar.checkbox("Only towns WITH dedicated bus stops", value=False)
-mode_filter = st.sidebar.multiselect(
-    "Show transport modes", ["taxis", "vans", "buses"], default=["taxis", "vans", "buses"]
-)
+mode_filter = st.sidebar.multiselect("Show transport modes", ["taxis", "vans", "buses"],
+                                     default=["taxis", "vans", "buses"])
+show_debug = st.sidebar.checkbox("Show debug info", value=False)
 
-# ---------- Fast preparation (cached by UI state) ----------
+# ---------- Prepare (cached by UI state) ----------
 @st.cache_data(show_spinner=False)
 def prepare(df: pd.DataFrame, road_type: str, require_bus_stop: bool):
     work = df.copy()
@@ -54,38 +54,38 @@ def prepare(df: pd.DataFrame, road_type: str, require_bus_stop: bool):
     if require_bus_stop and BUS_STOP_COL in work.columns:
         work = work[work[BUS_STOP_COL] == 1]
 
-    # Build vectorized "Condition"
+    # Build vectorized Condition
     stem = STEM_MAP[road_type]
-    good_col = stem + "good"
-    acc_col  = stem + "acceptable"
-    bad_col  = stem + "bad"
-    for c in (good_col, acc_col, bad_col):
+    g, a, b = stem + "good", stem + "acceptable", stem + "bad"
+    for c in (g, a, b):
         if c not in work.columns:
             work[c] = 0
 
-    # vectorized mapping: Bad > Acceptable > Good > Unknown
-    bad = work[bad_col].to_numpy() == 1
-    acc = work[acc_col].to_numpy() == 1
-    good = work[good_col].to_numpy() == 1
+    bad = work[b].to_numpy() == 1
+    acc = work[a].to_numpy() == 1
+    good = work[g].to_numpy() == 1
+
     cond = np.full(len(work), "Unknown", dtype=object)
     cond = np.where(bad, "Bad", cond)
     cond = np.where(~bad & acc, "Acceptable", cond)
     cond = np.where(~bad & ~acc & good, "Good", cond)
 
     work = work.assign(Condition=cond)
-    return work, good_col, acc_col, bad_col
+    return work, g, a, b
 
-work, good_col, acc_col, bad_col = prepare(df, road_type, require_bus_stop)
+work, gcol, acol, bcol = prepare(df, road_type, require_bus_stop)
+
+# ---------- Debug (optional) ----------
+if show_debug:
+    st.info(f"Plotly {plotly.__version__} | Pandas {pd.__version__} | Rows (filtered): {len(work)}")
 
 # ---------- KPI strip ----------
 c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("Towns (after filters)", f"{len(work):,}")
+with c1: st.metric("Towns (after filters)", f"{len(work):,}")
 with c2:
     pct_bus = (100 * work[BUS_STOP_COL].mean()) if BUS_STOP_COL in work.columns and len(work) else 0
     st.metric("% with bus stops", f"{pct_bus:.1f}%")
-with c3:
-    st.metric("Road type", road_type.capitalize())
+with c3: st.metric("Road type", road_type.capitalize())
 
 if len(work) == 0:
     st.warning("No towns match the selected filters.")
@@ -121,16 +121,14 @@ else:
 # ---------- Chart 3: With vs without bus stops ----------
 st.subheader("Quick Diagnostic: Bus Stops vs Road Condition")
 if BUS_STOP_COL in df.columns:
-    stem = STEM_MAP[road_type]
-    g, a, b = stem + "good", stem + "acceptable", stem + "bad"
     tmp = df.copy()
-    for c in (g, a, b):
+    for c in (gcol, acol, bcol):
         if c not in tmp.columns:
             tmp[c] = 0
 
-    bad = tmp[b].to_numpy() == 1
-    acc = tmp[a].to_numpy() == 1
-    good = tmp[g].to_numpy() == 1
+    bad = tmp[bcol].to_numpy() == 1
+    acc = tmp[acol].to_numpy() == 1
+    good = tmp[gcol].to_numpy() == 1
     cond = np.full(len(tmp), "Unknown", dtype=object)
     cond = np.where(bad, "Bad", cond)
     cond = np.where(~bad & acc, "Acceptable", cond)
@@ -139,8 +137,7 @@ if BUS_STOP_COL in df.columns:
 
     grp = (
         tmp.groupby(tmp[BUS_STOP_COL].map({1: "With Bus Stops", 0: "No Bus Stops"}))["Condition"]
-        .value_counts(normalize=True)
-        .rename("%").mul(100).reset_index()
+        .value_counts(normalize=True).rename("%").mul(100).reset_index()
     )
     pivot = (
         grp.pivot(index=BUS_STOP_COL, columns="Condition", values="%")
@@ -148,7 +145,11 @@ if BUS_STOP_COL in df.columns:
         .reindex(["With Bus Stops", "No Bus Stops"])
         .reindex(columns=["Bad", "Acceptable", "Good"], fill_value=0)
     )
-    st.plotly_chart(px.bar(pivot, barmode="stack", text_auto=".1f"), use_container_width=True)
+
+    fig3 = px.bar(pivot, barmode="stack")
+    fig3.update_traces(texttemplate="%{y:.1f}%", textposition="inside", cliponaxis=False)
+    fig3.update_layout(legend_title_text="Condition")
+    st.plotly_chart(fig3, use_container_width=True)
     st.caption("Compares condition shares for towns with vs without bus stops.")
 else:
     st.info("Bus-stop column not found in the dataset.")
