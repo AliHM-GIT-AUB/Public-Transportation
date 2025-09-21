@@ -1,11 +1,10 @@
-# app.py (clean + shorter title, no bus-stop filter)
+# app.py — short title, no debug toggle, optional map if lat/lon exist
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
 from pathlib import Path
-import plotly
 
 st.set_page_config(page_title="Lebanon Road & Public Transport", layout="wide")
 
@@ -45,7 +44,6 @@ mode_filter = st.sidebar.multiselect(
     ["taxis", "vans", "buses"],
     default=["taxis", "vans", "buses"]
 )
-show_debug = st.sidebar.checkbox("Show debug info", value=False)
 
 # ---------- Prepare (cached by UI state) ----------
 @st.cache_data(show_spinner=False)
@@ -73,13 +71,9 @@ def prepare(df: pd.DataFrame, road_type: str):
 
 work, gcol, acol, bcol = prepare(df, road_type)
 
-# ---------- Debug ----------
-if show_debug:
-    st.info(f"Plotly {plotly.__version__} | Pandas {pd.__version__} | Rows: {len(work)}")
-
 # ---------- KPI strip ----------
 c1, c2, c3 = st.columns(3)
-with c1: st.metric("Towns (dataset)", f"{len(work):,}")
+with c1: st.metric("Towns", f"{len(work):,}")
 with c2:
     pct_bus = (100 * work[BUS_STOP_COL].mean()) if BUS_STOP_COL in work.columns and len(work) else 0
     st.metric("% with dedicated bus stops", f"{pct_bus:.1f}%")
@@ -170,3 +164,35 @@ if BUS_STOP_COL in df.columns:
     )
 else:
     st.info("Bus-stop column not found in the dataset.")
+
+# ---------- OPTIONAL: Interactive map (requires lat/lon columns) ----------
+st.subheader("Where are these towns? (interactive map)")
+def find_coord_columns(columns):
+    cols_lower = {c.lower(): c for c in columns}
+    lat = cols_lower.get("lat") or cols_lower.get("latitude")
+    lon = cols_lower.get("lon") or cols_lower.get("longitude")
+    return lat, lon
+
+lat_col, lon_col = find_coord_columns(work.columns)
+
+if lat_col and lon_col:
+    map_df = work.copy()
+    map_df[lat_col] = pd.to_numeric(map_df[lat_col], errors="coerce")
+    map_df[lon_col] = pd.to_numeric(map_df[lon_col], errors="coerce")
+    map_df = map_df.dropna(subset=[lat_col, lon_col])
+    if not map_df.empty:
+        fig_map = px.scatter_mapbox(
+            map_df,
+            lat=lat_col, lon=lon_col,
+            color="Condition",
+            hover_name="Town" if "Town" in map_df.columns else None,
+            hover_data={lat_col: False, lon_col: False},
+            zoom=6, height=520
+        )
+        fig_map.update_layout(mapbox_style="open-street-map", margin={"l":0,"r":0,"t":0,"b":0})
+        st.plotly_chart(fig_map, use_container_width=True)
+    else:
+        st.info("Map not shown: no valid coordinates after filtering.")
+else:
+    st.info("Map not shown: the dataset has no Latitude/Longitude columns.")
+
